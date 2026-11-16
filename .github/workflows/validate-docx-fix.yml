@@ -1,0 +1,62 @@
+name: Validate docx paragraph fix
+
+on:
+  push:
+    branches: [validation/docx-paragraph-split]
+
+permissions:
+  contents: read
+
+jobs:
+  full-tox-matrix:
+    name: Full tox suite (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.11'
+            tox: py311
+          - python: '3.12'
+            tox: py312
+          - python: '3.13'
+            tox: py313
+          - python: '3.14'
+            tox: py314
+    steps:
+      - name: Check out validation inputs
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: validation-inputs
+          persist-credentials: false
+      - name: Check out exact reviewed commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: SoroushRF/adk-python
+          ref: 8cd1b4fc6494bf39db34058cb0c68277efd09a9b
+          path: source
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+        with:
+          enable-cache: false
+      - name: Verify commit and pin the tested dependency lock
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = 8cd1b4fc6494bf39db34058cb0c68277efd09a9b
+          cp ../validation-inputs/validation/docx-uv.lock uv.lock
+          uv tool install tox --with tox-uv
+      - name: Run the complete isolated tox suite
+        working-directory: source
+        run: |
+          set -o pipefail
+          tox --workdir "$RUNNER_TEMP/adk-docx-tox" -e '${{ matrix.tox }}'             --override 'testenv.commands=pytest tests/unittests -n 2 --junitxml=test-results.xml'             2>&1 | tee "$RUNNER_TEMP/docx-tox.log"
+      - name: Record test summary
+        if: always()
+        run: |
+          grep -E '[0-9]+ passed' "$RUNNER_TEMP/docx-tox.log" | tail -1 >> "$GITHUB_STEP_SUMMARY" || echo 'no summary line' >> "$GITHUB_STEP_SUMMARY"
