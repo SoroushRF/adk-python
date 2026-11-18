@@ -135,13 +135,72 @@ def _try_extract_docx_text(data: bytes) -> str | None:
       p_tag = f'{prefix}:p'
       t_tag = f'{prefix}:t'
 
+      # Run elements other than text, mapped the same way as python-docx's
+      # Run.text. A <w:br> adds a newline unless it is a page or column break.
+      run_elements = {
+          f'{prefix}:tab': '\t',
+          f'{prefix}:ptab': '\t',
+          f'{prefix}:br': '\n',
+          f'{prefix}:cr': '\n',
+          f'{prefix}:noBreakHyphen': '-',
+      }
+      # An attribute name starts after whitespace, so a long run of other
+      # characters is tried once rather than from every position.
+      attribute = re.compile(
+          r'(?<!\S)([^\s=]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')'
+      )
+      break_type = f'{prefix}:type'
+      # Elements whose content is not document text: tab stop definitions
+      # (<w:tabs> holds <w:tab> elements too), and tracked deletions and moves,
+      # whose text is in <w:delText>. A self-closing <w:del/> only marks a
+      # deleted paragraph mark and is ignored.
+      skipped_elements = {
+          f'{prefix}:tabs',
+          f'{prefix}:del',
+          f'{prefix}:moveFrom',
+      }
+      # One tag (closing slash, name, the rest of the tag) or the text between
+      # tags. Quoted attribute values may contain '>'. The rest of the tag
+      # starts with whitespace or '/', so it never overlaps the name, and the
+      # pattern stays linear on malformed input.
+      token = re.compile(
+          r'<(/?)([^\s/<>]+)'
+          r'([\s/][^<>"\']*(?:(?:"[^<"]*"|\'[^<\']*\')[^<>"\']*)*)?>'
+          r'|([^<]+)'
+      )
+
       paragraphs = []
       # Match only the paragraph tag itself, not other tags whose name starts
       # with it (e.g. <w:proofErr>, <w:pPr>).
       for p in re.split(rf'<{p_tag}(?=[\s/>])[^>]*>', xml_content):
-        texts = re.findall(rf'<{t_tag}(?:[^>]*)>([^<]*)</{t_tag}>', p)
-        if texts:
-          paragraphs.append(''.join(texts))
+        pieces = []
+        has_text = False
+        in_text = False
+        skip_depth = 0
+        for closing, name, attributes, text in token.findall(p):
+          self_closing = attributes.endswith('/')
+          if text:
+            if in_text and not skip_depth:
+              pieces.append(text)
+          elif name in skipped_elements:
+            if closing:
+              skip_depth = max(skip_depth - 1, 0)
+            elif not self_closing:
+              skip_depth += 1
+          elif skip_depth:
+            continue
+          elif name == t_tag:
+            in_text = not closing and not self_closing
+            has_text = has_text or in_text
+          elif name in run_elements and not closing:
+            if name == f'{prefix}:br' and any(
+                key == break_type and (value or other) in ('page', 'column')
+                for key, value, other in attribute.findall(attributes)
+            ):
+              continue
+            pieces.append(run_elements[name])
+        if has_text:
+          paragraphs.append(''.join(pieces))
 
       return '\n'.join(paragraphs)
   except (zipfile.BadZipFile, KeyError, struct.error) as e:

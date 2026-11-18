@@ -446,6 +446,121 @@ async def test_load_artifacts_keeps_docx_paragraph_with_proofing_marks_on_one_li
   assert artifact_part.text == 'The quick brwn fox jumps.\nSecond paragraph.'
 
 
+async def _load_docx_document_xml(document_xml: str) -> str:
+  """Runs a docx with the given word/document.xml through the tool."""
+  artifact_name = 'document.docx'
+  docx_bytes_io = io.BytesIO()
+  with zipfile.ZipFile(docx_bytes_io, 'w') as zf:
+    zf.writestr('word/document.xml', document_xml)
+
+  artifact = types.Part(
+      inline_data=types.Blob(
+          data=docx_bytes_io.getvalue(), mime_type='application/octet-stream'
+      )
+  )
+  tool_context = _StubToolContext({artifact_name: artifact})
+  llm_request = LlmRequest(
+      contents=[
+          types.Content(
+              role='user',
+              parts=[
+                  types.Part(
+                      function_response=types.FunctionResponse(
+                          name='load_artifacts',
+                          response={'artifact_names': [artifact_name]},
+                      )
+                  )
+              ],
+          )
+      ]
+  )
+
+  await load_artifacts_tool.process_llm_request(
+      tool_context=tool_context, llm_request=llm_request
+  )
+  return llm_request.contents[-1].parts[1].text
+
+
+@pytest.mark.asyncio
+async def test_load_artifacts_keeps_docx_tabs_line_breaks_and_hyphens():
+  """Run elements for tabs, line breaks and hyphens become their characters."""
+  # The first paragraph defines tab stops, which use <w:tab> too but are not
+  # text. Page and column breaks add nothing, as in python-docx.
+  text = await _load_docx_document_xml(
+      '<w:document'
+      ' xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      '<w:body><w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="2880"/>'
+      '<w:tab w:val="right" w:pos="8640"/></w:tabs></w:pPr><w:r>'
+      '<w:t>Name:</w:t><w:tab/><w:t>Ada</w:t></w:r></w:p><w:p><w:r>'
+      '<w:t>123 Main Street</w:t><w:br/><w:t>Springfield</w:t><w:cr/>'
+      '<w:t>USA</w:t></w:r></w:p><w:p><w:r><w:t>Send an e</w:t>'
+      '<w:noBreakHyphen/><w:t>mail.</w:t><w:br w:type="page"/></w:r></w:p>'
+      '</w:body></w:document>'
+  )
+
+  assert text == (
+      'Name:\tAda\n123 Main Street\nSpringfield\nUSA\nSend an e-mail.'
+  )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('run_element', 'expected_text'),
+    [
+        ('<w:tab/>', 'A\tB'),
+        ('<w:ptab w:relativeTo="margin" w:alignment="right"/>', 'A\tB'),
+        ('<w:br/>', 'A\nB'),
+        ('<w:br w:type="textWrapping"/>', 'A\nB'),
+        ('<w:cr/>', 'A\nB'),
+        ('<w:noBreakHyphen/>', 'A-B'),
+        ('<w:br w:type="page"/>', 'AB'),
+        ('<w:br w:type = "column"/>', 'AB'),
+        (
+            (
+                '<w:br xmlns:x="urn:x" x:note=" w:type=\'page\'"'
+                ' w:type="textWrapping"/>'
+            ),
+            'A\nB',
+        ),
+    ],
+)
+async def test_load_artifacts_maps_docx_run_elements(
+    run_element, expected_text
+):
+  """Each run element maps to the same text as in python-docx's Run.text."""
+  text = await _load_docx_document_xml(
+      '<w:document'
+      ' xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      f'<w:body><w:p><w:r><w:t>A</w:t>{run_element}<w:t>B</w:t></w:r></w:p>'
+      '</w:body></w:document>'
+  )
+
+  assert text == expected_text
+
+
+@pytest.mark.asyncio
+async def test_load_artifacts_skips_breaks_in_docx_tracked_deletions():
+  """Tabs and breaks in deleted or moved runs are skipped, like their text."""
+  # The self-closing <w:del/> marks a deleted paragraph mark and must not be
+  # read as the start of a deletion, even with '>' in an attribute value.
+  text = await _load_docx_document_xml(
+      '<w:document'
+      ' xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      '<w:body><w:p><w:pPr><w:rPr><w:del w:id="1" w:author="A>B"'
+      ' w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:t>Keep'
+      ' this</w:t></w:r><w:del w:id="2" w:author="A"'
+      ' w:date="2026-01-01T00:00:00Z"><w:r><w:tab/><w:br/>'
+      '<w:delText>removed</w:delText></w:r></w:del><w:r><w:t'
+      ' xml:space="preserve">, this</w:t></w:r><w:moveFrom w:id="3"'
+      ' w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:tab/>'
+      '<w:delText>moved</w:delText></w:r></w:moveFrom><w:r><w:t'
+      ' xml:space="preserve"> and this.</w:t></w:r></w:p></w:body>'
+      '</w:document>'
+  )
+
+  assert text == 'Keep this, this and this.'
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ('mime_type', 'expected_mime_type'),
