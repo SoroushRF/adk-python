@@ -46,6 +46,7 @@ jobs:
           test "$(git rev-parse HEAD)" = 2893f68b93b8d8693d6cc4788a3916a737a8f039
           uv --version
           uv tool install tox --with tox-uv
+          uv lock
       - name: Run the complete isolated tox suite
         working-directory: source
         run: |
